@@ -40,7 +40,7 @@ df = pd.read_excel(
     header=7
 )
 
-df.columns = df.columns.map(str)
+df.columns = df.columns.map(str).str.strip()
 df = df.loc[:, ~df.columns.str.contains("Unnamed")]
 df = df.dropna(how="all")
 
@@ -58,11 +58,11 @@ if sector_cols:
     print(f" Columna SECTOR detectada: {sector_col}")
 else:
     print("No se encontró columna SECTOR, se creará.")
-    df["Sector"] = "PRIVADO"
-    sector_col = "Sector"
+    df["SECTOR"] = "PRIVADO"
+    sector_col = "SECTOR"
 
-# Sanear SECTOR
-df["Sector"] = (
+# Normalizar SECTOR
+df["SECTOR"] = (
     df[sector_col]
     .astype(str)
     .str.upper()
@@ -70,19 +70,83 @@ df["Sector"] = (
     .str.strip()
 )
 
-# Reemplazar valores inválidos
-df["Sector"] = df["Sector"].replace(["NAN", "NONE", "NAT", ""], "PRIVADO")
+df["SECTOR"] = df["SECTOR"].replace(["NAN", "NONE", "NAT", ""], "PRIVADO")
 
 # ------------------------------
-# LIMPIEZA GENERAL: SOLO TEXTO VÁLIDO
+# LIMPIEZA GENERAL
 # ------------------------------
 
-cols_texto = ["Sector", "Sucursal", "Asegurado", "Intermediario", "Ramo"]
+cols_texto = ["SECTOR", "SUCURSAL", "ASEGURADO", "INTERMEDIARIO", "RAMO"]
 
 for col in cols_texto:
     if col in df.columns:
         df[col] = df[col].astype(str)
         df[col] = df[col].apply(lambda x: re.sub(r"[^A-Za-z0-9 ÁÉÍÓÚÑáéíóú.-]", "", x)).str.strip()
+    else:
+        print(f"ADVERTENCIA: La columna {col} no existe en el Excel.")
+
+# ------------------------------
+# FILTROS ESPECIALES
+# ------------------------------
+
+print("Aplicando reglas de sector...")
+
+# FECHA EMISIÓN
+if "FECHA EMISION" in df.columns:
+    df["FECHA EMISION"] = pd.to_datetime(df["FECHA EMISION"], errors="coerce").dt.date
+
+# Normalizar cadenas
+df["Asegurado_tmp"] = df["ASEGURADO"].astype(str).str.upper()
+df["Sucursal_tmp"] = df["SUCURSAL"].astype(str).str.upper()
+
+# MUNICIPIOS → OFICIAL
+municipios_keywords = [
+    "MUNICIPIO", "ALCALDIA", "ALCALDÍA", "GOBERNACION", "GOBERNACIÓN"
+]
+
+df.loc[
+    df["Asegurado_tmp"].str.contains("|".join(municipios_keywords), na=False),
+    "SECTOR"
+] = "OFICIAL"
+
+# HOSPITALES, AGUAS, POLICIA → OFICIAL
+oficial_keywords = [
+    "HOSPITAL", "AGUAS", "ENERGIA", "ENERGÍA",
+    "POLICIA", "POLICÍA", "ASORECIO"
+]
+
+df.loc[
+    df["Asegurado_tmp"].str.contains("|".join(oficial_keywords), na=False),
+    "SECTOR"
+] = "OFICIAL"
+
+# SUCURSAL ESTATAL
+df.loc[
+    df["Sucursal_tmp"].str.contains("ESTATAL", na=False),
+    "SECTOR"
+] = "OFICIAL"
+
+# SUCURSAL VIRTUAL
+df.loc[
+    df["Sucursal_tmp"].str.contains("VIRTUAL", na=False),
+    "SECTOR"
+] = "PRIVADO"
+
+# PERSONA NATURAL
+empresa_keywords = [
+    "S.A", "SAS", "LTDA", "E.S.E", "ESE", "EMPRESA",
+    "HOSPITAL", "FUNDACION", "FUNDACIÓN", "ASOCIACION", "ASOCIACIÓN"
+]
+
+df["EsEmpresa"] = df["Asegurado_tmp"].str.contains("|".join(empresa_keywords), na=False)
+
+df.loc[
+    ~df["EsEmpresa"] & (df["SECTOR"] != "OFICIAL"),
+    "SECTOR"
+] = "PRIVADO"
+
+# Eliminar columnas temporales
+df = df.drop(columns=["Asegurado_tmp", "Sucursal_tmp", "EsEmpresa"], errors="ignore")
 
 # ------------------------------
 # NORMALIZAR COLUMNAS
@@ -106,14 +170,32 @@ for col_old, col_new in date_map.items():
     else:
         df[col_new] = None
 
-# ------------------------------
-# NUMÉRICOS
-# ------------------------------
 
+# ------------------------------
+# ANTIGUEDAD
+# ------------------------------
+# Asegurarnos que sea varchar como en Excel
+df["ANTIGUEDAD"] = df["ANTIGUEDAD"].astype(str).str.strip()
+
+
+# ------------------------------
+# NUMÉRICOS / PRIMA TOTAL
+# ------------------------------
 if "PRIMA_TOTAL" in df.columns:
-    df["PrimaTotal"] = pd.to_numeric(df["PRIMA_TOTAL"], errors='coerce').fillna(0)
+    # Quitar espacios y convertir formato europeo a float
+    df["PrimaTotal"] = df["PRIMA_TOTAL"].astype(str)\
+        .str.replace(" ", "", regex=False)\
+        .str.replace(".", "", regex=False)\
+        .str.replace(",", ".", regex=False)
+    
+    # Convertir a float, reemplazar errores por 0
+    df["PrimaTotal"] = pd.to_numeric(df["PrimaTotal"], errors='coerce').fillna(0).round(2)
 else:
     df["PrimaTotal"] = 0
+
+
+
+
 
 # ------------------------------
 # RENOMBRAR COLUMNAS A SQL
@@ -160,6 +242,18 @@ except Exception as e:
 # INSERTAR DATOS
 # ------------------------------
 
+def clean_date(x):
+    if pd.isna(x):
+        return None
+    if str(x).strip() in ["", " ", "0000-00-00", "00/00/0000", "NaT"]:
+        return None
+    return x
+
+df["FechaEmision"] = df["FechaEmision"].apply(clean_date)
+df["FechaVigenciaDesde"] = df["FechaVigenciaDesde"].apply(clean_date)
+df["FechaVigenciaHasta"] = df["FechaVigenciaHasta"].apply(clean_date)
+
+
 insert_query = f"""
 INSERT INTO {TABLE_NAME} (
     CodIntermediario, Intermediario, Moneda, Sector, Sucursal, Asegurado, Ramo,
@@ -175,24 +269,26 @@ print("Iniciando inserciones...")
 for index, row in df.iterrows():
     try:
         cursor.execute(insert_query,
-            str(row.get("CodIntermediario")),
-            str(row.get("Intermediario")),
-            str(row.get("Moneda")),
-            str(row.get("Sector")),
-            str(row.get("Sucursal")),
-            str(row.get("Asegurado")),
-            str(row.get("Ramo")),
-            str(row.get("NumeroFactura")),
-            str(row.get("Poliza")),
-            str(row.get("Endoso")),
+            row.get("CodIntermediario"),
+            row.get("Intermediario"),
+            row.get("Moneda"),
+            row.get("Sector"),
+            row.get("Sucursal"),
+            row.get("Asegurado"),
+            row.get("Ramo"),
+            row.get("NumeroFactura"),
+            row.get("Poliza"),
+            row.get("Endoso"),
             row.get("FechaEmision"),
             row.get("Antiguedad"),
             row.get("FechaVigenciaDesde"),
             row.get("FechaVigenciaHasta"),
-            float(row.get("PrimaTotal"))
+            float(row.get("PrimaTotal") or 0)
+
         )
         count += 1
     except Exception as e:
+        print(f"Error al insertar fila {index}: {e}, valor PrimaTotal: {row.get('PrimaTotal')}")
         print(f"Error al insertar fila {index}: {e}")
 
 conn.commit()
