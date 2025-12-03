@@ -29,7 +29,7 @@ def extract_number(filename):
 
 
 def load_excel(path):
-    """ Carga solo XLSX. Si es XLS, lo rechaza. """
+    """Carga solo XLSX."""
     if path.lower().endswith(".xls"):
         raise Exception("Archivo XLS detectado. Convierte manualmente a XLSX.")
     return pd.read_excel(path, engine="openpyxl")
@@ -38,27 +38,54 @@ def load_excel(path):
 def clean_columns(df):
     df.columns = df.columns.str.strip()
 
-    # Convertir todo lo posible a string para evitar errores en ODBC
+    # Convertir a string todo lo que sea posible
     df = df.astype(str)
 
-    # Quitar saltos y espacios
+    # Limpiar caracteres dañinos
     df = df.apply(lambda col: col.str.replace(r"[\n\r\t]", " ", regex=True).str.strip())
+
+    # Normalizar fechas y horas
+    if "Fecha" in df.columns:
+        df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce").dt.date.astype(str)
+
+    if "Hora" in df.columns:
+        df["Hora"] = df["Hora"].astype(str).str.strip()
 
     return df
 
 
-def insert_data(df, cursor):
+def fetch_existing_ids(cursor):
+    """Traer IDs ya cargados a la tabla para evitar duplicados."""
+    cursor.execute(f"SELECT ID_PROCESS FROM {TABLE_NAME}")
+    return {str(row[0]) for row in cursor.fetchall()}
+
+
+def insert_data(df, cursor, existing_ids):
+    nuevos = 0
+    saltados = 0
+
     for _, row in df.iterrows():
+        id_process = str(row.get("ID_PROCESS", "")).strip()
+
+        if id_process in existing_ids:
+            saltados += 1
+            continue   # evitar duplicados
+
         cursor.execute(
             f"""
             INSERT INTO {TABLE_NAME} (ID_PROCESS, RESPONSE, DATE_LOG, HORA)
             VALUES (?, ?, ?, ?)
             """,
-            row.get("ID_PROCESS", ""),
+            id_process,
             row.get("RESPONSE", ""),
             row.get("Fecha", ""),
             row.get("Hora", "")
         )
+
+        existing_ids.add(id_process)
+        nuevos += 1
+
+    return nuevos, saltados
 
 
 # ------------------------------
@@ -77,6 +104,9 @@ for f in files_sorted:
 conn = pyodbc.connect(connection_string)
 cursor = conn.cursor()
 
+# Obtener IDs que ya existen en SQL
+existing_ids = fetch_existing_ids(cursor)
+
 for file in files_sorted:
     file_path = os.path.join(FOLDER_PATH, file)
     print(f"\nCargando archivo: {file_path}")
@@ -84,9 +114,11 @@ for file in files_sorted:
     try:
         df = load_excel(file_path)
         df = clean_columns(df)
-        insert_data(df, cursor)
+
+        nuevos, saltados = insert_data(df, cursor, existing_ids)
         conn.commit()
-        print("✔ Archivo cargado con éxito")
+
+        print(f"✔ Archivo cargado: {nuevos} nuevos, {saltados} duplicados ignorados")
 
     except Exception as e:
         print(f"❌ Error cargando {file}: {e}")
