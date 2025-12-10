@@ -179,21 +179,28 @@ df["ANTIGUEDAD"] = df["ANTIGUEDAD"].astype(str).str.strip()
 
 
 # ------------------------------
-# NUMÉRICOS / PRIMA TOTAL
+# NUMÉRICOS / PRIMA TOTAL  (VERSIÓN ROBUSTA)
 # ------------------------------
-if "PRIMA_TOTAL" in df.columns:
-    # Quitar espacios y convertir formato europeo a float
-    df["PrimaTotal"] = df["PRIMA_TOTAL"].astype(str)\
-        .str.replace(" ", "", regex=False)\
-        .str.replace(".", "", regex=False)\
-        .str.replace(",", ".", regex=False)
+if "PRIMA TOTAL" in df.columns or "PRIMA_TOTAL" in df.columns:
     
-    # Convertir a float, reemplazar errores por 0
-    df["PrimaTotal"] = pd.to_numeric(df["PrimaTotal"], errors='coerce').fillna(0).round(2)
+    # Detectar el nombre real de la columna
+    prima_col = "PRIMA TOTAL" if "PRIMA TOTAL" in df.columns else "PRIMA_TOTAL"
+
+    # Limpiar completamente valores raros, comas, puntos, símbolos y espacios
+    df["PrimaTotal"] = (
+        df[prima_col]
+        .astype(str)
+        .str.strip()
+        .str.replace(r"[^0-9,.-]", "", regex=True)   # dejar solo números y signos
+        .str.replace(".", "", regex=False)           # quitar separador de miles
+        .str.replace(",", ".", regex=False)          # convertir coma decimal a punto
+    )
+
+    # Convertir a número real seguro
+    df["PrimaTotal"] = pd.to_numeric(df["PrimaTotal"], errors="coerce").fillna(0).astype(float)
+
 else:
     df["PrimaTotal"] = 0
-
-
 
 
 
@@ -237,6 +244,22 @@ except Exception as e:
     print(" ERROR al conectar a SQL Server:")
     print(e)
     exit()
+
+
+
+# Convierte números y reemplaza valores inválidos por 0
+columnas_float = ["PrimaTotal", "ValorFactura", "Antiguedad", "OtroCampoQueSeaFloat"]
+
+for col in columnas_float:
+    if col in df.columns:
+        df[col] = (
+            df[col]
+            .astype(str)
+            .str.replace(",", "", regex=False)    # Quita comas
+            .str.replace("$", "", regex=False)    # Quita símbolos
+        )
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
 
 # ------------------------------
 # INSERTAR DATOS
