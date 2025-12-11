@@ -93,7 +93,11 @@ print("Aplicando reglas de sector...")
 
 # FECHA EMISIÓN
 if "FECHA EMISION" in df.columns:
-    df["FECHA EMISION"] = pd.to_datetime(df["FECHA EMISION"], errors="coerce").dt.date
+    df["FECHA EMISION"] = (
+        pd.to_datetime(df["FECHA EMISION"], errors="coerce", dayfirst=True)
+        .dt.date
+    )
+
 
 # Normalizar cadenas
 df["Asegurado_tmp"] = df["ASEGURADO"].astype(str).str.upper()
@@ -158,17 +162,25 @@ df.columns = df.columns.str.strip().str.replace(" ", "_")
 # FECHAS
 # ------------------------------
 
-date_map = {
-    "FECHA_EMISION": "FechaEmision",
-    "FECHA_DE_VIGENCIA_DESDE": "FechaVigenciaDesde",
-    "FECHA_DE_VIGENCIA_HASTA": "FechaVigenciaHasta"
-}
+# ------------------------------
+# LIMPIAR FECHAS
+# ------------------------------
 
-for col_old, col_new in date_map.items():
-    if col_old in df.columns:
-        df[col_new] = pd.to_datetime(df[col_old], errors='coerce').dt.date
+def limpiar_fecha(col):
+    if col in df.columns:
+        df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
     else:
-        df[col_new] = None
+        df[col] = None
+
+# Nombres reales ya transformados
+limpiar_fecha("FECHA_EMISION")
+limpiar_fecha("FECHA_DE_VIGENCIA_DESDE")
+limpiar_fecha("FECHA_DE_VIGENCIA_HASTA")
+
+# Crear las columnas finales que SQL espera
+df["FechaEmision"] = df["FECHA_EMISION"]
+df["FechaVigenciaDesde"] = df["FECHA_DE_VIGENCIA_DESDE"]
+df["FechaVigenciaHasta"] = df["FECHA_DE_VIGENCIA_HASTA"]
 
 
 # ------------------------------
@@ -180,20 +192,36 @@ df["ANTIGUEDAD"] = df["ANTIGUEDAD"].astype(str).str.strip()
 
 # ------------------------------
 # NUMÉRICOS / PRIMA TOTAL
-# ------------------------------
+# -----------------------------
+
+# --- LIMPIAR PRIMATOTAL ---
+def limpiar_prima(x):
+    if pd.isna(x):
+        return None
+    x = str(x).strip()
+
+    # Eliminar cualquier cosa que NO sea número , o .
+    x = re.sub(r"[^0-9,\.]", "", x)
+
+    # Formatos tipo "1.277.600,00" → quitar puntos
+    x = x.replace(".", "")
+
+    # Convertir coma decimal → punto
+    x = x.replace(",", ".")
+
+    # Si no queda nada válido → None
+    if x == "" or x == ".":
+        return None
+
+    try:
+        return float(x)
+    except:
+        return None
+
 if "PRIMA_TOTAL" in df.columns:
-    # Quitar espacios y convertir formato europeo a float
-    df["PrimaTotal"] = df["PRIMA_TOTAL"].astype(str)\
-        .str.replace(" ", "", regex=False)\
-        .str.replace(".", "", regex=False)\
-        .str.replace(",", ".", regex=False)
-    
-    # Convertir a float, reemplazar errores por 0
-    df["PrimaTotal"] = pd.to_numeric(df["PrimaTotal"], errors='coerce').fillna(0).round(2)
+    df["PrimaTotal"] = df["PRIMA_TOTAL"].apply(limpiar_prima)
 else:
-    df["PrimaTotal"] = 0
-
-
+    df["PrimaTotal"] = None
 
 
 
@@ -253,15 +281,23 @@ df["FechaEmision"] = df["FechaEmision"].apply(clean_date)
 df["FechaVigenciaDesde"] = df["FechaVigenciaDesde"].apply(clean_date)
 df["FechaVigenciaHasta"] = df["FechaVigenciaHasta"].apply(clean_date)
 
+errores_fecha = df[df["FechaEmision"].isna()]
+print("Filas con fecha inválida:")
+print(errores_fecha[["FechaEmision"]])
+
 
 insert_query = f"""
 INSERT INTO {TABLE_NAME} (
     CodIntermediario, Intermediario, Moneda, Sector, Sucursal, Asegurado, Ramo,
-    NumeroFactura, Poliza, Endoso, FechaEmision, Antiguedad,
+    NumeroFactura, Poliza, Endoso, FECHA_EMISION, Antiguedad,
     FechaVigenciaDesde, FechaVigenciaHasta, PrimaTotal
 )
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
+
+print(df["FECHA_EMISION"].head())
+
+
 
 count = 0
 print("Iniciando inserciones...")
@@ -283,7 +319,8 @@ for index, row in df.iterrows():
             row.get("Antiguedad"),
             row.get("FechaVigenciaDesde"),
             row.get("FechaVigenciaHasta"),
-            float(row.get("PrimaTotal") or 0)
+            row["PrimaTotal"]
+
 
         )
         count += 1
