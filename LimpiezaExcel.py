@@ -182,41 +182,37 @@ df["FechaEmision"] = df["FECHA_EMISION"]
 df["FechaVigenciaDesde"] = df["FECHA_DE_VIGENCIA_DESDE"]
 df["FechaVigenciaHasta"] = df["FECHA_DE_VIGENCIA_HASTA"]
 
-
 # ------------------------------
 # ANTIGUEDAD
 # ------------------------------
 # Asegurarnos que sea varchar como en Excel
 df["ANTIGUEDAD"] = df["ANTIGUEDAD"].astype(str).str.strip()
 
-
 # ------------------------------
 # NUMÉRICOS / PRIMA TOTAL
 # -----------------------------
 
 # --- LIMPIAR PRIMATOTAL ---
+
+from decimal import Decimal
+
 def limpiar_prima(x):
     if pd.isna(x):
         return None
+
     x = str(x).strip()
 
-    # Eliminar cualquier cosa que NO sea número , o .
-    x = re.sub(r"[^0-9,\.]", "", x)
+    # Solo permitir números
+    x = re.sub(r"[^0-9]", "", x)
 
-    # Formatos tipo "1.277.600,00" → quitar puntos
-    x = x.replace(".", "")
-
-    # Convertir coma decimal → punto
-    x = x.replace(",", ".")
-
-    # Si no queda nada válido → None
-    if x == "" or x == ".":
+    if x == "":
         return None
 
     try:
-        return float(x)
+        return Decimal(x)
     except:
         return None
+
 
 if "PRIMA_TOTAL" in df.columns:
     df["PrimaTotal"] = df["PRIMA_TOTAL"].apply(limpiar_prima)
@@ -224,6 +220,35 @@ else:
     df["PrimaTotal"] = None
 
 
+
+# ENDOSO
+
+#//////////////
+# LIMPIAR ENDOSO ANTES DEL RENOMBRE
+def limpiar_endoso(x):
+    if pd.isna(x):
+        return None
+    x = str(x).strip()
+
+    # Vacíos → NULL
+    if x == "" or x.upper() in ["NAN", "NONE", ".", "-", "--"]:
+        return None
+
+    # Solo números
+    x = re.sub(r"[^0-9]", "", x)
+
+    if x == "":
+        return None
+
+    return int(x)
+
+if "ENDOSO" in df.columns:
+    df["ENDOSO"] = df["ENDOSO"].apply(limpiar_endoso)
+else:
+    print("La columna ENDOSO no existe en el Excel.")
+
+
+    
 
 # ------------------------------
 # RENOMBRAR COLUMNAS A SQL
@@ -321,12 +346,31 @@ for index, row in df.iterrows():
             row.get("FechaVigenciaHasta"),
             row["PrimaTotal"]
 
-
         )
         count += 1
     except Exception as e:
-        print(f"Error al insertar fila {index}: {e}, valor PrimaTotal: {row.get('PrimaTotal')}")
+
         print(f"Error al insertar fila {index}: {e}")
+
+        print("👉 Valores enviados:")
+    print((
+        row.get("CodIntermediario"),
+        row.get("Intermediario"),
+        row.get("Moneda"),
+        row.get("Sector"),
+        row.get("Sucursal"),
+        row.get("Asegurado"),
+        row.get("Ramo"),
+        row.get("NumeroFactura"),
+        row.get("Poliza"),
+        row.get("Endoso"),
+        row.get("FechaEmision"),
+        row.get("Antiguedad"),
+        row.get("FechaVigenciaDesde"),
+        row.get("FechaVigenciaHasta"),
+        row.get("PrimaTotal")
+    ))
+    print("===============================================")
 
 conn.commit()
 cursor.close()
