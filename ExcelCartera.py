@@ -79,7 +79,7 @@ def ajustar_sector(row):
     # (no contiene palabras empresariales comunes)
     if not any(p in asegurado for p in [
         "ltda", "s.a", "sas", "municipio", "hospital",
-        "empresa", "corporacion", "universidad"
+        "empresa", "corporacion", "universidad", "policia", "aguas", "energia", "asorrecio"
     ]):
         return "PRIVADO"
 

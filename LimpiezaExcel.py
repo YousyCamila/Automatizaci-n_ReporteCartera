@@ -1,380 +1,185 @@
 import pandas as pd
+import os
 import pyodbc
 import numpy as np
-import os
-import re
 
-print("=== Iniciando automatización ===")
+print("=== INICIANDO LIMPIEZA BALANCE ANTIGÜEDAD ===")
 
-# ------------------------------
-# CONFIGURACIONES
-# ------------------------------
+# ==============================
+# RUTAS
+# ==============================
+INPUT_PATH = r"C:\Users\ASUS\Documents\EXCEL CARTERA\Pendientes x aplicar SOAT 30092025.xlsx"
+SHEET_NAME = "Balance Antigüedad"
+OUTPUT_PATH = r"C:\Users\ASUS\Documents\EXCEL CARTERA\Balance_Antiguedad_Limpio.xlsx"
 
-EXCEL_PATH = r"C:\Users\ASUS\Documents\EXCEL CARTERA\Pendientes x aplicar SOAT 30092025.xlsx"
+# ==============================
+# CONEXIÓN SQL SERVER
+# ==============================
 SERVER = "NANOYOKI-06\\SQLEXPRESS"
 DATABASE = "ReporteCartera"
 USERNAME = "sa"
 PASSWORD = "Sh@damy159"
-TABLE_NAME = "ReporteCartera"
 
-# ------------------------------
-# Verificar archivo Excel
-# ------------------------------
+connection_string = (
+    "DRIVER={ODBC Driver 17 for SQL Server};"
+    f"SERVER={SERVER};"
+    f"DATABASE={DATABASE};"
+    f"UID={USERNAME};"
+    f"PWD={PASSWORD};"
+    "TrustServerCertificate=yes;"
+)
 
-if not os.path.exists(EXCEL_PATH):
-    print("ERROR: No se encontró el archivo Excel en la ruta:")
-    print(EXCEL_PATH)
-    exit()
-
-print(" Archivo Excel encontrado.")
-
-# ------------------------------
-# Cargar Excel
-# ------------------------------
-
-print("=== Cargando Excel correctamente ===")
+# ==============================
+# LEER EXCEL
+# ==============================
+print("Existe archivo:", os.path.exists(INPUT_PATH))
 
 df = pd.read_excel(
-    EXCEL_PATH,
-    sheet_name="Balance Antigüedad",
+    INPUT_PATH,
+    sheet_name=SHEET_NAME,
     header=7
 )
 
-df.columns = df.columns.map(str).str.strip()
-df = df.loc[:, ~df.columns.str.contains("Unnamed")]
-df = df.dropna(how="all")
-
-print("Columnas detectadas en el Excel:")
+print("Columnas detectadas:")
 print(df.columns.tolist())
 
-# ------------------------------
-# BUSCAR COLUMNA SECTOR
-# ------------------------------
+# ==============================
+# NORMALIZACIÓN
+# ==============================
+def normalizar(texto):
+    if pd.isna(texto):
+        return ""
+    return str(texto).lower().strip()
 
-sector_cols = [c for c in df.columns if "sector" in c.lower()]
+for col in ["SECTOR", "SUCURSAL", "ASEGURADO"]:
+    df[col] = df[col].astype(str)
 
-if sector_cols:
-    sector_col = sector_cols[0]
-    print(f" Columna SECTOR detectada: {sector_col}")
-else:
-    print("No se encontró columna SECTOR, se creará.")
-    df["SECTOR"] = "PRIVADO"
-    sector_col = "SECTOR"
+# ==============================
+# FECHAS → DATE
+# ==============================
+for col in ["FECHA EMISION", "FECHA DE VIGENCIA DESDE", "FECHA DE VIGENCIA HASTA"]:
+    df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True).dt.date
 
-# Normalizar SECTOR
-df["SECTOR"] = (
-    df[sector_col]
+# ==============================
+# REGLAS DE SECTOR
+# ==============================
+def ajustar_sector(row):
+    sector_original = normalizar(row["SECTOR"])
+    asegurado = normalizar(row["ASEGURADO"])
+    sucursal = normalizar(row["SUCURSAL"])
+
+    if "estatal" in sucursal:
+        return "OFICIAL"
+    if "virtual" in sucursal:
+        return "PRIVADO"
+
+    if sector_original == "privado" and any(
+        p in asegurado for p in [
+            "municipio", "hospital", "aguas",
+            "energia", "policia", "asorrecio"
+        ]
+    ):
+        return "OFICIAL"
+
+    palabras_empresa = [
+        "ltda", "sas", "s.a", "s a", "e.s.p", "esp",
+        "empresa", "corporacion", "universidad",
+        "policia", "aguas", "energia"
+    ]
+
+    if not any(p in asegurado for p in palabras_empresa):
+        return "PRIVADO"
+
+    return sector_original.upper()
+
+df["SECTOR"] = df.apply(ajustar_sector, axis=1)
+
+# ==============================
+# PRIMA TOTAL → NUMÉRICO
+# ==============================
+df["PRIMA TOTAL"] = (
+    df["PRIMA TOTAL"]
     .astype(str)
-    .str.upper()
-    .str.replace(r"[^A-ZÁÉÍÓÚÑ ]", "", regex=True)
-    .str.strip()
+    .str.replace(r"[^\d]", "", regex=True)
 )
 
-df["SECTOR"] = df["SECTOR"].replace(["NAN", "NONE", "NAT", ""], "PRIVADO")
+df["PRIMA TOTAL"] = pd.to_numeric(df["PRIMA TOTAL"], errors="coerce").fillna(0).astype(int)
 
-# ------------------------------
-# LIMPIEZA GENERAL
-# ------------------------------
+# ==============================
+# GUARDAR EXCEL LIMPIO
+# ==============================
+df.to_excel(OUTPUT_PATH, index=False)
+print("Excel limpio creado:", OUTPUT_PATH)
 
-cols_texto = ["SECTOR", "SUCURSAL", "ASEGURADO", "INTERMEDIARIO", "RAMO"]
-
-for col in cols_texto:
-    if col in df.columns:
-        df[col] = df[col].astype(str)
-        df[col] = df[col].apply(lambda x: re.sub(r"[^A-Za-z0-9 ÁÉÍÓÚÑáéíóú.-]", "", x)).str.strip()
-    else:
-        print(f"ADVERTENCIA: La columna {col} no existe en el Excel.")
-
-# ------------------------------
-# FILTROS ESPECIALES
-# ------------------------------
-
-print("Aplicando reglas de sector...")
-
-# FECHA EMISIÓN
-if "FECHA EMISION" in df.columns:
-    df["FECHA EMISION"] = (
-        pd.to_datetime(df["FECHA EMISION"], errors="coerce", dayfirst=True)
-        .dt.date
-    )
-
-
-# Normalizar cadenas
-df["Asegurado_tmp"] = df["ASEGURADO"].astype(str).str.upper()
-df["Sucursal_tmp"] = df["SUCURSAL"].astype(str).str.upper()
-
-# MUNICIPIOS → OFICIAL
-municipios_keywords = [
-    "MUNICIPIO", "ALCALDIA", "ALCALDÍA", "GOBERNACION", "GOBERNACIÓN"
-]
-
-df.loc[
-    df["Asegurado_tmp"].str.contains("|".join(municipios_keywords), na=False),
-    "SECTOR"
-] = "OFICIAL"
-
-# HOSPITALES, AGUAS, POLICIA → OFICIAL
-oficial_keywords = [
-    "HOSPITAL", "AGUAS", "ENERGIA", "ENERGÍA",
-    "POLICIA", "POLICÍA", "ASORECIO"
-]
-
-df.loc[
-    df["Asegurado_tmp"].str.contains("|".join(oficial_keywords), na=False),
-    "SECTOR"
-] = "OFICIAL"
-
-# SUCURSAL ESTATAL
-df.loc[
-    df["Sucursal_tmp"].str.contains("ESTATAL", na=False),
-    "SECTOR"
-] = "OFICIAL"
-
-# SUCURSAL VIRTUAL
-df.loc[
-    df["Sucursal_tmp"].str.contains("VIRTUAL", na=False),
-    "SECTOR"
-] = "PRIVADO"
-
-# PERSONA NATURAL
-empresa_keywords = [
-    "S.A", "SAS", "LTDA", "E.S.E", "ESE", "EMPRESA",
-    "HOSPITAL", "FUNDACION", "FUNDACIÓN", "ASOCIACION", "ASOCIACIÓN"
-]
-
-df["EsEmpresa"] = df["Asegurado_tmp"].str.contains("|".join(empresa_keywords), na=False)
-
-df.loc[
-    ~df["EsEmpresa"] & (df["SECTOR"] != "OFICIAL"),
-    "SECTOR"
-] = "PRIVADO"
-
-# Eliminar columnas temporales
-df = df.drop(columns=["Asegurado_tmp", "Sucursal_tmp", "EsEmpresa"], errors="ignore")
-
-# ------------------------------
-# NORMALIZAR COLUMNAS
-# ------------------------------
-
-df.columns = df.columns.str.strip().str.replace(" ", "_")
-
-# ------------------------------
-# FECHAS
-# ------------------------------
-
-# ------------------------------
-# LIMPIAR FECHAS
-# ------------------------------
-
-def limpiar_fecha(col):
-    if col in df.columns:
-        df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
-    else:
-        df[col] = None
-
-# Nombres reales ya transformados
-limpiar_fecha("FECHA_EMISION")
-limpiar_fecha("FECHA_DE_VIGENCIA_DESDE")
-limpiar_fecha("FECHA_DE_VIGENCIA_HASTA")
-
-# Crear las columnas finales que SQL espera
-df["FechaEmision"] = df["FECHA_EMISION"]
-df["FechaVigenciaDesde"] = df["FECHA_DE_VIGENCIA_DESDE"]
-df["FechaVigenciaHasta"] = df["FECHA_DE_VIGENCIA_HASTA"]
-
-# ------------------------------
-# ANTIGUEDAD
-# ------------------------------
-# Asegurarnos que sea varchar como en Excel
-df["ANTIGUEDAD"] = df["ANTIGUEDAD"].astype(str).str.strip()
-
-# ------------------------------
-# NUMÉRICOS / PRIMA TOTAL
-# -----------------------------
-
-# --- LIMPIAR PRIMATOTAL ---
-
-from decimal import Decimal
-
-def limpiar_prima(x):
-    if pd.isna(x):
-        return None
-
-    x = str(x).strip()
-
-    # Solo permitir números
-    x = re.sub(r"[^0-9]", "", x)
-
-    if x == "":
-        return None
-
-    try:
-        return Decimal(x)
-    except:
-        return None
-
-
-if "PRIMA_TOTAL" in df.columns:
-    df["PrimaTotal"] = df["PRIMA_TOTAL"].apply(limpiar_prima)
-else:
-    df["PrimaTotal"] = None
-
-
-
-# ENDOSO
-
-#//////////////
-# LIMPIAR ENDOSO ANTES DEL RENOMBRE
-def limpiar_endoso(x):
-    if pd.isna(x):
-        return None
-    x = str(x).strip()
-
-    # Vacíos → NULL
-    if x == "" or x.upper() in ["NAN", "NONE", ".", "-", "--"]:
-        return None
-
-    # Solo números
-    x = re.sub(r"[^0-9]", "", x)
-
-    if x == "":
-        return None
-
-    return int(x)
-
-if "ENDOSO" in df.columns:
-    df["ENDOSO"] = df["ENDOSO"].apply(limpiar_endoso)
-else:
-    print("La columna ENDOSO no existe en el Excel.")
-
-
-    
-
-# ------------------------------
-# RENOMBRAR COLUMNAS A SQL
-# ------------------------------
-
-df = df.rename(columns={
-    "COD_INTERMEDIARIO": "CodIntermediario",
+# ==============================
+# RENOMBRAR COLUMNAS → SQL
+# ==============================
+df_sql = df.rename(columns={
+    "COD INTERMEDIARIO": "CodIntermediario",
     "INTERMEDIARIO": "Intermediario",
     "MONEDA": "Moneda",
     "SECTOR": "Sector",
     "SUCURSAL": "Sucursal",
     "ASEGURADO": "Asegurado",
     "RAMO": "Ramo",
-    "NRO._FACTURA": "NumeroFactura",
+    "NRO. FACTURA": "NroFactura",
     "POLIZA": "Poliza",
     "ENDOSO": "Endoso",
-    "ANTIGUEDAD": "Antiguedad"
+    "FECHA EMISION": "FechaEmision",
+    "ANTIGUEDAD": "Antiguedad",
+    "FECHA DE VIGENCIA DESDE": "FechaVigenciaDesde",
+    "FECHA DE VIGENCIA HASTA": "FechaVigenciaHasta",
+    "PRIMA TOTAL": "PrimaTotal"
 })
 
-print("Columnas finales:")
-print(df.columns.tolist())
+# ==============================
+# NaN → None (SQL NULL)
+# ==============================
+df_sql = df_sql.replace({np.nan: None})
 
-# ------------------------------
-# CONEXIÓN A SQL
-# ------------------------------
+# ==============================
+# INSERTAR EN SQL SERVER
+# ==============================
+print("Conectando a SQL Server...")
+conn = pyodbc.connect(connection_string)
+cursor = conn.cursor()
+cursor.fast_executemany = True
 
-try:
-    print("Conectando a SQL Server...")
-    conn = pyodbc.connect(
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={SERVER};"
-        f"DATABASE={DATABASE};"
-        f"UID={USERNAME};"
-        f"PWD={PASSWORD}"
-    )
-    cursor = conn.cursor()
-    print("Conexión exitosa.")
-except Exception as e:
-    print(" ERROR al conectar a SQL Server:")
-    print(e)
-    exit()
-
-# ------------------------------
-# INSERTAR DATOS
-# ------------------------------
-
-def clean_date(x):
-    if pd.isna(x):
-        return None
-    if str(x).strip() in ["", " ", "0000-00-00", "00/00/0000", "NaT"]:
-        return None
-    return x
-
-df["FechaEmision"] = df["FechaEmision"].apply(clean_date)
-df["FechaVigenciaDesde"] = df["FechaVigenciaDesde"].apply(clean_date)
-df["FechaVigenciaHasta"] = df["FechaVigenciaHasta"].apply(clean_date)
-
-errores_fecha = df[df["FechaEmision"].isna()]
-print("Filas con fecha inválida:")
-print(errores_fecha[["FechaEmision"]])
-
-
-insert_query = f"""
-INSERT INTO {TABLE_NAME} (
-    CodIntermediario, Intermediario, Moneda, Sector, Sucursal, Asegurado, Ramo,
-    NumeroFactura, Poliza, Endoso, FECHA_EMISION, Antiguedad,
-    FechaVigenciaDesde, FechaVigenciaHasta, PrimaTotal
+insert_query = """
+INSERT INTO dbo.PolizasCartera (
+    CodIntermediario, Intermediario, Moneda, Sector, Sucursal,
+    Asegurado, Ramo, NroFactura, Poliza, Endoso,
+    FechaEmision, Antiguedad, FechaVigenciaDesde,
+    FechaVigenciaHasta, PrimaTotal
 )
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
-print(df["FECHA_EMISION"].head())
+data = [
+    (
+        row.CodIntermediario,
+        row.Intermediario,
+        row.Moneda,
+        row.Sector,
+        row.Sucursal,
+        row.Asegurado,
+        row.Ramo,
+        row.NroFactura,
+        row.Poliza,
+        row.Endoso,
+        row.FechaEmision,
+        row.Antiguedad,
+        row.FechaVigenciaDesde,
+        row.FechaVigenciaHasta,
+        row.PrimaTotal
+    )
+    for row in df_sql.itertuples(index=False)
+]
 
-
-
-count = 0
-print("Iniciando inserciones...")
-
-for index, row in df.iterrows():
-    try:
-        cursor.execute(insert_query,
-            row.get("CodIntermediario"),
-            row.get("Intermediario"),
-            row.get("Moneda"),
-            row.get("Sector"),
-            row.get("Sucursal"),
-            row.get("Asegurado"),
-            row.get("Ramo"),
-            row.get("NumeroFactura"),
-            row.get("Poliza"),
-            row.get("Endoso"),
-            row.get("FechaEmision"),
-            row.get("Antiguedad"),
-            row.get("FechaVigenciaDesde"),
-            row.get("FechaVigenciaHasta"),
-            row["PrimaTotal"]
-
-        )
-        count += 1
-    except Exception as e:
-
-        print(f"Error al insertar fila {index}: {e}")
-
-        print("👉 Valores enviados:")
-    print((
-        row.get("CodIntermediario"),
-        row.get("Intermediario"),
-        row.get("Moneda"),
-        row.get("Sector"),
-        row.get("Sucursal"),
-        row.get("Asegurado"),
-        row.get("Ramo"),
-        row.get("NumeroFactura"),
-        row.get("Poliza"),
-        row.get("Endoso"),
-        row.get("FechaEmision"),
-        row.get("Antiguedad"),
-        row.get("FechaVigenciaDesde"),
-        row.get("FechaVigenciaHasta"),
-        row.get("PrimaTotal")
-    ))
-    print("===============================================")
-
+cursor.executemany(insert_query, data)
 conn.commit()
+
 cursor.close()
 conn.close()
 
-print(f" Inserción finalizada. Registros insertados: {count}")
-print("=== Automatización finalizada ===")
+print("=== CARGA COMPLETADA EN SQL SERVER ===")
