@@ -60,40 +60,49 @@ for col in ["SECTOR", "SUCURSAL", "ASEGURADO"]:
 for col in ["FECHA EMISION", "FECHA DE VIGENCIA DESDE", "FECHA DE VIGENCIA HASTA"]:
     df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True).dt.date
 
-# ==============================
+# ------------------------------
 # REGLAS DE SECTOR
-# ==============================
+# ------------------------------
+
+# Palabras clave que obligan a OFICIAL si está en PRIVADO
+palabras_oficial = [
+   "municipio",
+    "hospital",
+    "aguas",
+    "energia",
+    "policia",
+    "asorrecio"
+]
+
 def ajustar_sector(row):
-    sector_original = normalizar(row["SECTOR"])
+    sector = normalizar(row["SECTOR"])
     asegurado = normalizar(row["ASEGURADO"])
     sucursal = normalizar(row["SUCURSAL"])
 
+    # 1. Sucursal estatal → OFICIAL
     if "estatal" in sucursal:
         return "OFICIAL"
+
+    # 2. Sucursal virtual → PRIVADO
     if "virtual" in sucursal:
         return "PRIVADO"
 
-    if sector_original == "privado" and any(
-        p in asegurado for p in [
-            "municipio", "hospital", "aguas",
-            "energia", "policia", "asorrecio"
-        ]
-    ):
+   # 3. Asegurado con palabras clave → OFICIAL
+    if sector == "privado" and any(p in asegurado for p in palabras_oficial):
         return "OFICIAL"
 
-    palabras_empresa = [
-        "ltda", "sas", "s.a", "s a", "e.s.p", "esp",
-        "empresa", "corporacion", "universidad",
-        "policia", "aguas", "energia"
-    ]
-
-    if not any(p in asegurado for p in palabras_empresa):
+    # 4. Persona natural → PRIVADO
+    # (no contiene palabras empresariales comunes)
+    if not any(p in asegurado for p in [
+        "ltda", "s.a", "sas", "municipio", "hospital",
+        "empresa", "corporacion", "universidad", "policia", "aguas", "energia", "asorrecio"
+    ]):
         return "PRIVADO"
 
-    return sector_original.upper()
+    # Si no aplica ninguna regla, se queda igual
+    return sector.upper()
 
 df["SECTOR"] = df.apply(ajustar_sector, axis=1)
-
 # ==============================
 # PRIMA TOTAL → NUMÉRICO
 # ==============================
